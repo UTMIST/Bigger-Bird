@@ -37,6 +37,12 @@ from exp_11_nsa.model import PatchedModel as NSAModel
 from exp_12_s2_hhst.model import PatchedModel as S2HHSTModel
 from exp_13_dynamic_context.model import PatchedModel as DynamicContextModel
 from exp_14_token_drop_deepseek.model import PatchedModel as TokenDropDeepSeekModel
+from exp_15_bigger_bird.model import PatchedModel as BiggerBirdProperModel
+
+# Model names for experiments that need a non-BART base
+MODEL_NAMES = {
+    15: "google/bigbird-roberta-base",
+}
 
 # Compute presets
 COMPUTE_CONFIGS = {
@@ -138,6 +144,34 @@ EXPERIMENT_CONFIGS = {
         TokenDropDeepSeekModel,
         {"drop_after_layer": 3, "drop_ratio": 0.3, "top_k": 64, "low_rank_dim": 16, "use_triton": True},
     ),
+    15: (
+        "exp_15_bigger_bird",
+        BiggerBirdProperModel,
+        {
+            "fragment_size": 128,
+            "r_target_softmax": 0.02,
+            "min_k": 56,
+            "max_k": 64,
+            "globals_per_head": 6,
+            "teleports_per_head": 4,
+            "teleport_bias_frac": 0.75,
+            "top_u": 32,
+            "proto_count": 48,
+            "mmr_prefilter_mult": 3,
+            "mmr_diversity_steps": 2,
+            "gamma_diversity": 0.16,
+            "alpha_pos_prior": 0.12,
+            "share_stride_layers": 2,
+            "dense_fallback_under": 512,
+            "random_selection": False,
+            "debug_collect": False,
+            "log_once_pairs": True,
+            "use_topk_mmr": True,
+            "use_dynamic_globals": True,
+            "use_random_attn": True,
+            "use_teleports": False,
+        },
+    ),
 }
 
 def main():
@@ -160,8 +194,8 @@ Examples:
         """
     )
     
-    parser.add_argument("--exp", type=int, choices=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14],
-                       help="Experiment number (0=baseline, 1-4=original sparse methods, 5-10=new hybrid/advanced ideas, 11=NSA, 12=S2-HHST, 13=Dynamic Context)")
+    parser.add_argument("--exp", type=int, choices=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+                       help="Experiment number (0=baseline, 1-4=original sparse methods, 5-10=new hybrid/advanced ideas, 11=NSA, 12=S2-HHST, 13=Dynamic Context, 14=Token Drop+DeepSeek, 15=Proper Bigger Bird)")
     parser.add_argument("--size", type=str, choices=["small", "medium", "big", "xl", "long"],
                        help="Compute size preset")
     parser.add_argument("--list", action="store_true",
@@ -231,15 +265,20 @@ Examples:
     print(f"{'='*70}\n")
     
     # Setup
-    model_name = "facebook/bart-base"
+    model_name = MODEL_NAMES.get(args.exp, "facebook/bart-base")
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
     base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=2)
     base_model.config.classifier_dropout = 0.1
     
-    # Extend position embeddings if seq length exceeds BART's native 1024
+    # Extend position embeddings if seq length exceeds the model's native limit
     if compute["max_length"] > base_model.config.max_position_embeddings:
-        print(f"Extending position embeddings from {base_model.config.max_position_embeddings} -> {compute['max_length']} tokens")
-        extend_position_embeddings(base_model, compute["max_length"])
+        if model_name == "google/bigbird-roberta-base":
+            print(f"Extending BigBird position embeddings from {base_model.config.max_position_embeddings} -> {compute['max_length']} tokens")
+            tokenizer.model_max_length = compute["max_length"]
+            # PatchedModel will handle embedding extension via context_len
+        else:
+            print(f"Extending position embeddings from {base_model.config.max_position_embeddings} -> {compute['max_length']} tokens")
+            extend_position_embeddings(base_model, compute["max_length"])
     
     # Enable gradient checkpointing if requested
     if args.grad_checkpoint:
@@ -250,7 +289,10 @@ Examples:
     if ModelClass is None:
         model = base_model
     else:
-        model = ModelClass(base_model, **model_params)
+        if args.exp == 15:
+            model = ModelClass(base_model, context_len=compute["max_length"], **model_params)
+        else:
+            model = ModelClass(base_model, **model_params)
     
     # Build dataset: use fixed-length padding for long-context stress tests
     use_fixed = args.fixed_length or args.size == "long"

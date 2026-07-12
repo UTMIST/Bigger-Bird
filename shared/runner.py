@@ -57,6 +57,10 @@ def _compute_softmax_comparisons(seq_len, model, extra_meta):
         M = meta["local_k"] + meta["num_globals"] + meta["num_teleports"]
         return base * M
 
+    # Exp 15: Proper Bigger Bird (BigBird-based) — rough estimate via max_k keys per query
+    if "fragment_size" in meta and "max_k" in meta:
+        return base * meta["max_k"]
+
     # Exp 6: DeepSeek + PBS — same as top_k per query (sparse high-prec attention)
     if "top_k" in meta and "block_size" in meta and "num_blocks" in meta:
         return base * meta["top_k"]
