@@ -29,24 +29,24 @@
 \maketitle
 
 \begin{abstract}
-The quadratic cost of dense self-attention limits efficient scaling of
-Transformer models to long contexts. We present Bigger Bird, a context-aware
-sparse attention mechanism that combines attention sinks, a sliding local
-window, and content-based routing of distant key--value positions, where
-routing scores are derived from mean causal attention probabilities over a
-late-prompt query set. Our Triton kernel implements 64 sink tokens, a
-16{,}384-token local window, a per-head routed budget of up to 512 positions,
-and exact dense attention over the final 256 prompt queries. We evaluate the
-method under a paired dense baseline on BF16 R1-Distill-Llama-8B across
-1{,}178 long-context examples from LongCodeQA, Code.Debug, and LongBench~v2.
-Pooled accuracy is 34.6\% for Bigger Bird versus 35.3\% for dense attention,
-while mean prefill throughput improves by $1.09$--$1.27\times$ on the longer
-subsets. A complementary no-KV-cache LongCodeQA pilot at 542K--878K tokens
-yields a $10.23\times$ mean prefill speedup on 18 prompts. Prior prototype screens and encoder-scale IMDb / kernel experiments are
-retained as developmental evidence: they document the architecture search,
-early scaling behavior, and design rationale behind the current method. The
-present draft emphasizes inference-time evaluation; sparse-attention training
-is left to future work.
+
+% The quadratic complexity of dense attention makes it challenging to efficiently scale Transformers to long contexts. Here we introduce Bigger Bird, using a context-aware sparse attention mechanism. This model combines attention sinks, a sliding local window, and content-based routing of distant key--value positions, where routing scores are derived from mean causal attention probabilities over a late-prompt query set. Our Triton kernel implements 64 sink tokens, a
+% 16{,}384-token local window, a per-head routed budget of up to 512 positions, and exact dense attention over the final 256 prompt queries. We evaluate the
+% method under a paired dense baseline on BF16 R1-Distill-Llama-8B across
+% 1{,}178 long-context examples from LongCodeQA, Code.Debug, and LongBench~v2.
+% Pooled accuracy is 34.6\% for Bigger Bird versus 35.3\% for dense attention,
+% while mean prefill throughput improves by $1.09$--$1.27\times$ on the longer
+% subsets. A complementary no-KV-cache LongCodeQA pilot at 542K--878K tokens
+% yields a $10.23\times$ mean prefill speedup on 18 prompts. Together, these results suggest that attention routing can substantially reduce long-context prefill cost while keeping pooled accuracy close to dense attention. This points to a possible path toward more efficient long-context inference and motivates exploring whether sparse attention can also reduce the cost of training at longer contexts. However, our experiments evaluate inference only, and the small 1M-token pilot does not yet establish accuracy or efficiency at that scale. We include early IMDb and kernel experiments to show scale at different context windows, how early scale behaviour and the iteration process led up to the current method with design rationale. We focus on inference-time evaluation, and sparse-attention training is left as future work. 
+
+
+
+
+
+
+The quadratic complexity of dense attention makes it challenging to efficiently scale Transformers to long contexts. Here we introduce Bigger Bird, using context-sensitive sparse attention. This model uses attention sinks, a sliding window, and routing of distant key-value pairs based on the average causal attention probabilities across a set of late prompt queries. In the Triton implementation, 64 attention sinks, 16,384 tokens within the sliding window, head-specific routed attention to up to 512 positions and exact dense attention on the final 256 prompt queries can be applied. We test the performance of this model against a dense baseline on BF16 R1-Distill-Llama-8B on 1,178 long context examples. Pooled accuracy was 34.6\% for Bigger Bird compared to 35.3\% using dense attention. Prefill speeds were improved by $1.09$-$1.27$x faster in the longest subsets of prompts. For further analysis, we performed a pilot experiment without using KV caches on LongCodeQA with prompt lengths between 542K--878K tokens. Using this data, we improve prefill speeds by a factor of $10.23$x averaged over 18 prompts. These findings indicate that sparse attention routing can significantly reduce prefill costs in long contexts, while maintaining pooled accuracy similar to dense attention. This suggests potential for more efficient long-context inference. In this work, we only consider inference performance, so it remains to be seen if we can also reduce training costs in long contexts using sparse attention. Furthermore, the pilot only covers up to 1M tokens, meaning that we cannot be certain of the accuracy or efficiency at this scale. Initial IMDb and attention-kernel experiments are shown to demonstrate scaling for different context window sizes, and document the iterative development and design rationale behind Bigger Bird. 
+
+
 \end{abstract}
 
 \newpage
@@ -55,101 +55,112 @@ is left to future work.
 \newpage
 \section{Introduction}
 
-Transformer models rely on self-attention to connect each token with every
-other token in a sequence. Dense self-attention forms an $n\times n$ attention
-matrix, giving it $\bigO(n^2)$ comparison and memory cost in sequence length
-$n$ \citep{vaswani2017attention}. This quadratic dependence is a practical
-bottleneck for long-context inference and for any future training regime that
-must process long documents end to end.
+% Transformer models rely on self-attention to connect each token with every other token in a sequence. Dense self-attention forms an $n\times n$ attention matrix, giving it $\bigO(n^2)$ comparison and memory cost in sequence length $n$ \citep{vaswani2017attention}. This quadratic dependence is a practical bottleneck for long-context inference and for any future training regime that must process long documents end to end.
 
-Bigger Bird investigates context-aware sparse attention as an alternative to
-paying this cost uniformly. Rather than committing to a fixed sparse graph, the
-method allocates computation to early attention sinks, a recent local window,
-and a content-selected set of distant key--value positions. The current system
-of record is \textbf{Bigger Bird v3}: a training-free Triton sparse-prefill
-kernel for decoder LLMs, evaluated under a paired dense baseline on
-R1-Distill-Llama-8B. Decode remains exact on the retained KV cache; optional
-KV eviction and related memory savers are studied as complementary
-inference-time mechanisms.
+% Bigger Bird investigates context-aware sparse attention as an alternative to paying this cost uniformly. Rather than committing to a fixed sparse graph, the method allocates computation to early attention sinks, a recent local window, and a content-selected set of distant key--value positions. The current system of record is \textbf{Bigger Bird v3}: a training-free Triton sparse-prefill kernel for decoder LLMs, evaluated under a paired dense baseline on R1-Distill-Llama-8B. Decode remains exact on the retained KV cache; optional KV eviction and related memory savers are studied as complementary inference-time mechanisms.
 
-The project developed through a broader architecture search. Experiments~0--15
-cover encoder-scale prototypes on BART / BigBird-RoBERTa
-\citep{zaheer2020bigbird}; Experiments~16--19 extend the sparse-attention
-search on R1; Experiment~20 is the real long-context benchmark suite; and
-Experiment~21 studies routing reuse and cache variants. After situating the work in the literature (Section~\ref{sec:related}),
-this draft presents the Bigger Bird v3 method, the experimental setup, the
-primary R1 results, and the developmental encoder evidence that explains how
-the project arrived at the current design.
+% The project developed through a broader architecture search. Experiments~0--15
+% cover encoder-scale prototypes on BART / BigBird-RoBERTa \citep{zaheer2020bigbird}; Experiments~16--19 extend the sparse-attention search on R1; Experiment~20 is the real long-context benchmark suite; and Experiment~21 studies routing reuse and cache variants. After situating the work in the literature (Section~\ref{sec:related}), this draft presents the Bigger Bird v3 method, the experimental setup, the primary R1 results, and the developmental encoder evidence that explains how the project arrived at the current design.
+
+
+
+
+The self-attention mechanism in Transformers provides pairwise interactions
+between all tokens in a sequence. However, dense attention has
+$\mathcal{O}(n^2)$ time and space complexity, where $n$ is the sequence
+length \citep{vaswani2017attention}. This quadratic complexity limits
+inference on long contexts and future end-to-end training on long documents.
+
+To reduce this cost, Bigger Bird implements context-aware sparse
+attention. The model computes attention weights over (i) early attention
+targets, (ii) local attention windows, and (iii) a set of key--value pairs
+determined by content.
+
+This work presents a training-free sparse-prefill kernel for decoder LLMs
+(Bigger Bird v3). We compare it against a dense baseline using
+R1-Distill-Llama-8B. Full decoding uses the preserved KV cache. We also
+investigate optional KV-cache eviction and other memory-efficient strategies
+as complementary approaches for inference.
+
+The experiments were part of a larger architecture search. Experiments
+0--15 apply encoder-scale models to BART and BigBird-RoBERTa
+\citep{zaheer2020bigbird}. Experiments 16--19 extend the sparse-attention
+search to R1. Experiment 20 is a long-context benchmark suite, and
+Experiment 21 investigates routing reuse and KV-cache variants. Following
+the background (Section~\ref{sec:related}), we detail the methods used in Bigger Bird v3, our experimental setup, key results for R1 and provide evidence from encoder models that illustrates how we converged on our current design.
 
 \section{Related Work}
 \label{sec:related}
 
+Bigger Bird~v3 combines three ideas that have appeared separately in prior
+work: a fixed scaffold of sink and local tokens, long-range positions chosen
+from the prompt's own attention, and a training-free kernel that applies this
+selection during prefill. We review each line of work in turn, from fixed
+patterns to the sparse-prefill methods closest to ours, and close with the
+techniques used in our earlier encoder prototypes.
+
 \paragraph{Fixed sparse patterns.}
-Early efficient-attention methods restrict each query to a predefined set of
-keys. Sparse Transformers \citep{child2019sparse} factorize attention into
-strided and fixed patterns, lowering its cost to $\bigO(n\sqrt{n})$.
-Longformer \citep{beltagy2020longformer} and BigBird \citep{zaheer2020bigbird}
-combine a sliding window with a small number of global tokens, and BigBird
-adds random connections. Both were pretrained with these patterns and can
-replace full self-attention in encoder models for document-level tasks. A
-separate line of work approximates the full attention matrix rather than
-sparsifying it: Linformer \citep{wang2020linformer} projects keys and values
-to a fixed length, and Performer \citep{choromanski2021performer} estimates
-softmax attention with random features. Among our experiments, the windowed
-designs in Experiments~2, 3, and~9 are closest to the sparse-pattern family;
-Experiment~2 also adds a linear-attention global path
-\citep{qin2024lightning}, and Experiment~15 starts directly from a BigBird
-checkpoint.
+Sparse Transformers \citep{child2019sparse} restrict each query to strided
+and fixed patterns, reducing attention cost to $\bigO(n\sqrt{n})$. Longformer
+\citep{beltagy2020longformer} and BigBird \citep{zaheer2020bigbird} combine a
+sliding window with a small number of global tokens, and BigBird adds random
+links. These patterns are chosen before the input is seen and are built into
+the model during pretraining. Bigger Bird keeps their local-plus-global
+structure, but chooses its long-range positions for each prompt and applies
+them to a pretrained model without retraining.
 
-\paragraph{Content-based routing.}
-A second line of work lets the input decide which positions interact.
-Reformer \citep{kitaev2020reformer} groups similar queries and keys with
-locality-sensitive hashing, and the Routing Transformer
-\citep{roy2021routing} assigns them to clusters with online $k$-means and
-restricts attention to each cluster. Experiments~1, 4, 6, 10, and~14 share
-this principle but score keys directly, either through a low-rank projection
-or through pooled block summaries, and keep the top-$k$. More recent work
-applies block-level routing at the scale of large language models: Native
-Sparse Attention \citep{yuan2025nsa}, which Experiment~11 reimplements,
-combines compressed, selected, and sliding-window branches, while MoBA
-\citep{lu2025moba} routes each query to a few key blocks with a gate modeled
-on mixture-of-experts layers.
-
-\paragraph{Token pruning.}
-Instead of thinning the attention pattern, token-pruning methods shorten the
-sequence itself. PoWER-BERT \citep{goyal2020powerbert} and learned token
-pruning \citep{kim2021tokenpruning} remove tokens judged uninformative as
-depth increases, so later layers operate on fewer positions. Token Dropping
-(Experiment~8) and Dynamic Context (Experiment~13) take the same approach,
-using the $\ell_2$ norm of each hidden state as the importance score.
-
-\paragraph{Attention sinks.}
+\paragraph{Attention sinks and streaming.}
 \citet{xiao2024streamingllm} observed that pretrained language models direct
 a large share of attention to the first few tokens even when those tokens
 carry little meaning, and that keeping these ``attention sinks'' alongside a
-recent window stabilizes long-stream generation without fine-tuning.
-Experiment~12 likewise keeps a fixed set of sink tokens visible to every
-query, and Experiment~9 always attends to anchor tokens at the start, middle,
-and end of the sequence.
+recent window lets a model run on long streams without fine-tuning. Our sink
+and local components follow the same design. However, because StreamingLLM
+discards everything outside the window, evidence in the middle of a long
+prompt becomes unreachable; the routed positions in Bigger Bird are intended
+to recover it.
 
-\paragraph{Diversity-aware selection.}
-The selection rules in the earlier Bigger Bird encoder designs come from
-information retrieval and summarization. Maximal marginal relevance
-\citep{carbonell1998mmr} trades relevance against redundancy when ranking
-candidates, and facility location is a standard submodular objective for
-choosing a representative subset \citep{lin2011submodular}. Experiment~5 uses
-MMR to choose local keys, while Experiment~15 and the BigBird-family ablation
-also use facility location to choose global keys.
+\paragraph{KV-cache selection.}
+A related line of work reduces decoding cost by keeping only part of the KV
+cache. H2O \citep{zhang2023h2o} retains entries with high accumulated
+attention, and SnapKV \citep{li2024snapkv} scores prompt positions for each
+head using an observation window at the end of the prompt. Our router uses a
+similar signal, the mean attention from the final 64 prompt queries, but
+applies it to prefill instead: the selected positions determine which keys
+each query attends to, while the full cache is kept for decoding.
 
-\paragraph{Inference-time sparse attention and cache compression.}
-Recent decoder-side methods sparsify or compress attention without full
-retraining. MInference assigns heads to sparse pattern families at inference
-time; SnapKV evicts KV entries using attention near the prompt end; and
-DeepSeek's DSA uses a lightweight indexer to select top-$k$ KV entries per
-query. Hierarchical summary routers such as LSA and ZHA are related future
-comparisons. Bigger Bird v3 is closest to content-based selection with sinks
-and a local window, but routes from late-prompt query attention rather than a
-separately trained indexer.
+\paragraph{Sparse prefill.}
+The closest work makes prefill itself sparse. MInference
+\citep{jiang2024minference} assigns each head a sparse pattern family offline
+and estimates its indices for each prompt. DeepSeek Sparse Attention
+\citep{deepseek2025v32} adds a lightweight indexer that selects the top-$k$
+entries for each query; the indexer still scores the full preceding context,
+and the model is adapted to the sparse pattern through continued training.
+Bigger Bird differs from both by applying one pattern to every head, with no
+offline pattern search and no training. More recent hierarchical routers, LSA
+and ZHA, reduce routing cost further using key summaries; we have not
+evaluated them and treat them as future comparisons.
+
+\paragraph{Trainable sparse attention.}
+Native Sparse Attention \citep{yuan2025nsa} combines compressed, selected,
+and sliding-window branches, and MoBA \citep{lu2025moba} routes each query to
+a few key blocks. Both learn their sparsity during pretraining or continued
+training. They show that trained sparse attention can work at scale, but they
+require changing the model's weights, so they are not directly comparable to
+a training-free method. Our decoder screens included an untrained NSA-style
+variant, which failed retrieval (Section~\ref{sec:results}).
+
+\paragraph{Techniques from our encoder prototypes.}
+The earlier prototypes in Section~\ref{sec:developmental} drew on a wider
+range of ideas. Reformer \citep{kitaev2020reformer} and the Routing
+Transformer \citep{roy2021routing} group similar queries and keys by hashing
+or clustering; Experiments~1, 4, 6, and~10 instead score keys directly and
+keep the top-$k$. PoWER-BERT \citep{goyal2020powerbert} and learned token
+pruning \citep{kim2021tokenpruning} shorten the sequence as depth increases,
+as do Token Dropping and Dynamic Context (Experiments~8 and~13). The encoder
+Bigger Bird designs (Experiments~5 and~15) selected keys with maximal
+marginal relevance \citep{carbonell1998mmr} and facility location
+\citep{lin2011submodular}, two standard objectives for choosing a relevant
+but non-redundant subset.
 
 \section{Method}
 \label{sec:methodology}
@@ -304,8 +315,9 @@ middle layers, and 32 in late layers.
 Runs three ordinary dense attention layers to extract local features, scores
 each token's importance by the $\ell_2$ norm of its hidden state, and drops
 the bottom 30\% of tokens before continuing with a shorter sequence for the
-remaining layers. \emph{Complexity:} attention cost after the drop point
-scales with $\mathrm{keep\_ratio}^2$ relative to the undropped sequence. This
+remaining layers. \emph{Complexity:} after the drop point, attention cost
+scales with $\mathrm{keep\_ratio}^2$ while projection and FFN layers scale
+linearly with $\mathrm{keep\_ratio}$ relative to the undropped sequence. This
 follows the broader token-pruning literature \citep{goyal2020powerbert,kim2021tokenpruning}.
 
 \subsubsection*{Experiment 9: Attention Speculation}
@@ -315,6 +327,8 @@ Inspired by speculative decoding \citep{leviathan2023speculative}. Every layer r
 additionally computes full dense attention as a verifier and adds a
 KL-divergence distillation loss that trains the fast path to mimic full
 attention. At inference, only the fast path executes.
+
+The core complexity still remains  $\bigO(N^2)$ however, since the attention is pre-computed, it accelerates inference greatly. However, the algorithmic time complexity remains unchanged. Wrong speculation also has the same fallback 
 
 \subsubsection*{Experiment 10: Grouped-Query Sparse Attention}
 \label{exp:gqa}
@@ -326,38 +340,73 @@ groups, so softmax cost drops from $\bigO(N)$ to $\bigO(K)$ per query
 
 \subsubsection*{Experiment 11: Native Sparse Attention (NSA)}
 \label{exp:nsa}
-Combines three parallel branches -- compressed (pooled) attention, explicitly
-selected-block attention, and sliding-window attention -- whose outputs are
-combined per query. This experiment is marked incomplete (``TODO'') in the
-codebase at the time of this report; see the note at the start of
-Section~\ref{sec:architectures} and the original NSA design
-\citep{yuan2025nsa}.
+This architecture combines three parallel attention branches per
+query : coarse-grained compressed (pooled) attention, fine-grained
+explicitly selected-block attention, and local sliding-window attention --
+whose outputs are fused via learned per-query gates. This experiment is
+marked incomplete (``TODO'') in the codebase at the time of this report; see
+the note at the start of Section~\ref{sec:architectures} and the original NSA
+design \citep{yuan2025nsa}. \\ 
+\emph{Claims of the project:} Achieves sub-quadratic, hardware-aligned
+attention complexity by operating on contiguous blocks rather than scattered
+tokens, targeting significant reductions in memory bandwidth and FLOPs while
+remaining end-to-end trainable and competitive with dense attention on long
+sequences.\\ 
+Classic dense attention
+scales as $\bigO(N^2)$ and spends most of its compute attending to low-weight
+distant tokens at full resolution. NSA separates global gist (compressed
+branch), sharp long-range retrieval (selected-block branch), and local
+context (sliding-window branch), preserving full-sequence information flow
+at a fraction of the memory and compute cost.
 
 \subsubsection*{Experiment 12: S2-HHST}
 \label{exp:s2hhst}
-Shard-based hierarchical sparse attention with dedicated sink tokens: the
-sequence is partitioned into shards, attention is computed hierarchically
-within and across shards, and fixed sink tokens are always visible. This
-experiment is likewise marked incomplete (``TODO'') in the codebase; see the
-note at the start of Section~\ref{sec:architectures}.
+Shard-based hierarchical sparse attention with
+dedicated sink tokens: the sequence is partitioned into shards, attention is
+computed hierarchically within each shard and across shard-level
+representations, and a fixed set of sink tokens remains globally visible to
+all queries. This experiment is likewise marked incomplete (``TODO'') in the
+codebase; see the note at the start of Section~\ref{sec:architectures}.\\
+\emph{Claims of the project:} Replaces the global $\bigO(N^2)$ attention
+matrix with hierarchical shard-level scaling (local intra-shard cost plus
+reduced cross-shard cost), lowering peak activation memory and enabling
+longer context lengths than dense attention under the same hardware budget.\\ 
+Classic attention forces
+every token to attend directly to every other token, creating a quadratic
+bottleneck. Hierarchical sharding avoids all-to-all token interactions while
+still allowing information to propagate across the full sequence, and
+dedicated sink tokens absorb excess softmax probability mass to keep sparse
+attention distributions stable.
 
 \subsubsection*{Experiment 13: Dynamic Context}
 \label{exp:dynamic-context}
 Extends Token Dropping to arbitrarily long inputs. After three dense early
-layers, tokens are scored by hidden-state $\ell_2$ norm and exactly 4096 are
+layers, tokens are scored by hidden-state $\ell_2$ norm and up to 4096 are
 retained regardless of the original length. Inputs longer than 8192 tokens
 are processed independently by chunk in the early layers, avoiding a full
 input-length attention matrix; late layers always attend over the fixed
 budget. \emph{Complexity:}
-$\bigO(\mathrm{num\_chunks}\times\mathrm{chunk\_size}^2)$ for early layers
-plus $\bigO(\mathrm{budget}^2)$ for late layers.
+$\bigO(\mathrm{num\_chunks}\times\mathrm{chunk\_size}^2) = \bigO(N \cdot \mathrm{chunk\_size})$
+for early layers plus $\bigO(\mathrm{budget}^2)$ for late layers.
 
 \subsubsection*{Experiment 14: Token Drop + DeepSeek Routing}
 \label{exp:token-drop-deepseek}
-Combines Token Dropping with the DeepSeek-style low-rank router for two levels
-of sparsity. Early layers run densely, 30\% of low-importance tokens are
-dropped after layer 3, and subsequent layers apply top-$k$ routing to the
-shortened sequence. Defaults are top-$k=64$ and low-rank dimension 16.
+ Combines Token Dropping with a DeepSeek-style
+low-rank router for two levels of sparsity. Early layers run densely to
+extract local features, 30\% of low-importance tokens (scored by hidden-state
+$\ell_2$ norm) are dropped after layer 3, and subsequent layers apply
+low-rank top-$k$ routing to the shortened sequence. Defaults are top-$k=64$
+and low-rank dimension 16.\\
+\emph{Claims of the project:} Compounds two reductions in late layers:
+dropping tokens shrinks the active sequence length to $N' = 0.7N$ (reducing
+both projection and FFN compute linearly), while top-$k$ routing reduces
+late-layer value aggregation to $\bigO(N' \cdot k)$ using a cheap low-rank
+scoring step ($\bigO(N'^2 d_r)$ with $d_r = 16 \ll d$).\\ Classic attention
+allocates uniform compute to every token and every token pair across all
+layers. By pruning redundant tokens early and restricting the surviving
+tokens to their top-$k$ most relevant keys, this hybrid eliminates both
+token-level redundancy and pairwise attention waste while preserving dense
+feature extraction in the early layers.
 
 \subsubsection*{Experiment 15: Proper Bigger Bird (BigBird-RoBERTa backbone)}
 \label{exp:proper-bb}
@@ -410,57 +459,120 @@ Follow-up study of routing reuse across layers and KV-cache eviction /
 compression at long context, including held-out fact retention probes near
 1M tokens. Cross-layer route reuse is incompatible with per-layer eviction
 when cache slots no longer refer to the same tokens.
-
-
+\newpage
 \section{Experimental Setup}
 \label{sec:setup}
-\label{sec:dataset}
 
-The evaluation has four aims: (i)~test whether context-aware sparse prefill
-preserves dense answer quality on real long-context benchmarks;
-(ii)~measure prefill time, decode speed, and peak memory under a matched dense
-baseline into the 32K--130K regime, with pilots beyond 500K tokens;
-(iii)~identify which routing mechanisms survive synthetic retrieval screens;
-and (iv)~retain encoder-scale IMDb / LRA runs as developmental rationale and
-small-scale scaling evidence
-(Section~\ref{sec:developmental}).
+\subsection{Objectives}
+\label{sec:objectives}
+
+The evaluation addresses four objectives. The first two support the main
+claims; the last two indicates how the final design was achieved.
+\begin{enumerate}
+  \item Test whether \textbf{context-aware sparse prefill preserves dense answer
+    quality} on real long-context benchmarks (Table~\ref{tab:r1-benchmark}).
+  \item Measure \textbf{prefill time, decode speed, and peak memory} under a matched
+    dense baseline into the 32K--130K regime, with pilots beyond 500K tokens
+    (Tables~\ref{tab:r1-benchmark}--\ref{tab:1m-evals}).
+  \item Identify \textbf{which routing mechanisms retain near-dense accuracy} in
+    synthetic retrieval screens
+    (Tables~\ref{tab:screening}--\ref{tab:v3-ablate}).
+  \item Characterize how \textbf{attention-kernel time, latency, and memory scale
+    with sequence length} for early encoder-scale variants on IMDb reviews
+    (Section~\ref{sec:developmental}).
+\end{enumerate}
 
 \subsection{Evaluation suites}
+\label{sec:dataset}
 
-\textbf{Primary (current).} The main quantitative claims use BF16
-R1-Distill-Llama-8B under a paired dense baseline:
+\textbf{Primary (current).} The main quantitative claims use \texttt{BF16
+R1-Distill-Llama-8B}~\citep{Guo_2025} under a paired dense baseline on three
+real long-context benchmarks:
 \begin{itemize}
-  \item \textbf{LongCodeQA} repository comprehension (32K / 64K / 128K
-    buckets, plus a 1M-token pilot);
-  \item \textbf{InfiniteBench Code.Debug} bug localization;
-  \item \textbf{LongBench~v2} multi-domain long-context reasoning;
-  \item synthetic \textbf{RULER} needle-in-a-haystack screens used during
-    method development \citep{hsieh2024ruler}.
+  \item \textbf{LongCodeQA}~\citep{rando2025longcodebenchevaluatingcodingllms}
+    repository comprehension (32K / 64K / 128K buckets, plus a 1M-token pilot);
+  \item \textbf{InfiniteBench Code.Debug}~\citep{zhang-etal-2024-bench} bug
+    localization;
+  \item \textbf{LongBench~v2}~\citep{bai-etal-2025-longbench} multi-domain
+    long-context reasoning.
 \end{itemize}
-Accuracy on the real suites is the first-token A--D choice. Prefill is a
-full-prompt forward; decode timing uses a short CUDA-graph probe and is not a
-patch-success metric.
+Separately, synthetic \textbf{RULER} needle-in-a-haystack
+tests~\citep{hsieh2024ruler} were used during method development to analyze
+candidate designs, and they are not part of the main claims.
+
+Table~\ref{tab:suites} summarizes the three real suites. All three are
+four-way multiple choice, so chance accuracy is 25\%. Code.Debug and
+LongBench~v2 are hard enough that even dense attention scores close to
+chance (Section~\ref{sec:results}). Scoring and timing details are given in
+Section~\ref{sec:protocol}.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Long-context evaluation suites. All items are four-way multiple
+    choice (chance $=25\%$). Prompts are capped at 130K tokens and
+    middle-truncated beyond the cap. Mean tokens is the prompt length
+    after truncation.}
+  \label{tab:suites}
+  \begin{tabular}{@{}lllrrr@{}}
+    \toprule
+    Suite & Task & Bucket & $n$ & Mean tokens & Truncated \\
+    \midrule
+    LongCodeQA~\citep{rando2025longcodebenchevaluatingcodingllms}
+      & Repository QA & 32K  & 113 & $\sim$20K  & 0 \\
+      &               & 64K  & 76  & $\sim$50K  & 0 \\
+      &               & 128K & 92  & $\sim$88K  & 0 \\
+    Code.Debug~\citep{zhang-etal-2024-bench}
+      & Bug localization & -- & 394 & $\sim$108K & 136 \\
+    LongBench~v2~\citep{bai-etal-2025-longbench}
+      & Multi-domain reasoning & -- & 503 & $\sim$85K  & 186 \\
+    \midrule
+    Total & & & 1{,}178 & & 322 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \textbf{Developmental (supporting).} Earlier work used \textbf{IMDb}
 sentiment classification on BART / BigBird-RoBERTa at fixed lengths
 \citep{maas2011imdb}, plus exploratory \textbf{Long Range Arena (LRA)}
-ListOps and Text runs \citep{tay2021lra}. Those smaller-scale experiments
-document how the project searched architectures, observed early scaling
-trends, and chose content-aware routing. They explain how we arrived at
-Bigger Bird v3; they are not the primary long-context claim.
+ListOps and Text runs \citep{tay2021lra}. Most LRA runs did not rise above
+chance or majority-class accuracy, so they are reported only in the appendix.
+Those smaller-scale experiments document how the project searched
+architectures, observed early scaling trends, and chose content-aware
+routing. They explain how we arrived at Bigger Bird v3; they are not the
+primary long-context claim.
 
 \subsection{Experimental Protocol}
 \label{sec:protocol}
 
 \paragraph{Current R1 protocol.}
-Primary runs use BF16 R1-Distill-Llama-8B on H100 80~GB under a paired dense
-baseline (HF SDPA) versus Bigger Bird v3. Prompts are capped at 130{,}000
-tokens (middle-truncated where necessary). Prefill is a full-prompt forward
-with MLP chunking (8{,}192); decode timing uses a 16-step greedy CUDA-graph
-probe. Accuracy is the first answer-token distribution renormalized over
-A--D. The matched suite completed every listed item in both arms with no OOM
-(final report dated 2~Nov~2026). A separate LongCodeQA 1M pilot uses
-no-KV-cache full-prompt forwards on identical untruncated prompts.
+Primary runs use \texttt{BF16 R1-Distill-Llama-8B} on a single H100 80~GB with batch
+size 1, comparing a paired dense baseline (HF SDPA under PyTorch's default
+backend dispatch, which selects the FlashAttention kernel for causal BF16
+inputs on the H100) against Bigger Bird v3. Both arms see identical prompts.
+Prompts are capped at 130{,}000 tokens; longer prompts are middle-truncated,
+because the task instructions and the question sit at the start and end of
+each prompt. Prefill is a full-prompt forward with MLP chunking (8{,}192
+tokens). Before timing, each arm runs two warmup forwards on synthetic
+20{,}000- and 20{,}001-token prompts so that the Triton kernels are compiled
+and specialized. Each item is then prefilled once per arm, and the reported
+prefill times are means over items, not over repeated runs of the same item.
+Decode timing uses a separate 16-step greedy CUDA-graph probe; it measures
+speed only, not the quality of generated text or patch success.
+
+Accuracy is read from the first answer-token distribution, renormalized over
+the four options A--D. We score without chain-of-thought generation,
+following the no-CoT setting of LongBench~v2: the prompt ends with an empty
+think block and the cue ``The correct answer is ('', so the answer letter
+depends only on the prefill. This isolates the effect of sparse prefill from
+the variance of long reasoning traces and keeps the runs within the compute
+budget. The matched suite completed every listed item in both arms with no
+OOM. A separate LongCodeQA 1M pilot uses no-KV-cache full-prompt forwards on
+identical untruncated prompts.
+
+All runs use PyTorch 2.13.0 (CUDA 13.0), transformers 5.15.1, and the Triton
+release bundled with that PyTorch build, together with the corrected R1
+tokenizer; results produced before the tokenizer fix are excluded.
 
 \paragraph{Developmental encoder protocol.}
 Earlier work used an isolated attention-kernel benchmark (CUDA, 10 timing
@@ -473,7 +585,7 @@ estimates and are treated as developmental evidence.
 \subsection{Metrics}
 \label{sec:metrics}
 
-Table~\ref{tab:metrics} defines the metrics used in this draft. For the
+Table~\ref{tab:metrics} defines the metrics used in this report. For the
 current R1 claims, A--D accuracy, prefill time, decode ms/token, and peak
 allocated memory are primary. F1 and related IMDb / kernel metrics apply to
 the developmental encoder experiments in Section~\ref{sec:developmental}.
@@ -483,15 +595,21 @@ the developmental encoder experiments in Section~\ref{sec:developmental}.
   \small
   \caption{Metrics used in this report.}
   \label{tab:metrics}
-  \begin{tabularx}{\textwidth}{@{}lXll@{}}
+  \begin{tabularx}{\textwidth}{@{}lXl@{}}
     \toprule
     Metric & Interpretation & Unit \\
     \midrule
-    A--D accuracy & First-token multiple-choice correctness (R1 suites) & 0--1 \\
+    A--D accuracy & First-token multiple-choice correctness (R1 suites;
+      chance $=25\%$) & \% \\
     Prefill time & Full-prompt forward latency & s \\
     Prefill ratio & Mean dense prefill / mean Bigger Bird prefill
       ($>1$ favors BB) & $\times$ \\
-    Decode speed & CUDA-graph probe latency & ms/token \\
+    Median paired ratio & Median over examples of dense / BB prefill time;
+      robust to a few very long prompts & $\times$ \\
+    Decode speed & CUDA-graph probe 
+    
+    
+    & ms/token \\
     Peak memory & Max CUDA allocated over prefill (+ short decode) & GB \\
     F1 & IMDb sentiment quality (developmental) & 0--1 \\
     Attention forward time & Isolated kernel runtime (developmental) & ms \\
@@ -501,6 +619,10 @@ the developmental encoder experiments in Section~\ref{sec:developmental}.
   \end{tabularx}
 \end{table}
 
+Accuracy differences between the paired arms are tested with an exact
+McNemar test on per-example correctness. A non-significant result is not
+evidence of equivalence, so we report the paired difference alongside the
+$p$-value.
 
 \section{Results}
 \label{sec:results}
@@ -515,16 +637,8 @@ that path.
 
 \subsection{Matched R1 long-context benchmarks}
 
-The tables below summarize the matched H100 evaluation of Bigger Bird v3
-against dense attention (BF16 R1-Distill-Llama-8B; final report updated
-2~Nov~2026). BB denotes Bigger Bird v3.
-
-
-We evaluated 1{,}178 paired examples on one H100 80~GB. LongCodeQA tests
-repository comprehension, Code.Debug tests bug localization, and LongBench~v2
-tests long-context reasoning. Accuracy is the first-token choice among A--D.
-Prefill is a full-prompt forward; decode is a separate 16-step CUDA-graph
-timing probe.
+The tables below summarize the matched evaluation of Bigger Bird v3 (BB)
+against dense attention using BF16 R1-Distill-Llama-8B on a single H100 80 GB GPU (updated November 2, 2026). Both methods were evaluated on 1,178 paired examples across LongCodeQA (repository comprehension), Code.Debug (bug localization), and LongBench v2 (long-context reasoning). Accuracy was measured using first-token multiple-choice predictions (A--D), while prefill latency was measured through full-prompt forwards and decode speed through a separate 16-step CUDA-graph probe. 
 
 \begin{table}[ht]
   \centering
@@ -546,13 +660,7 @@ timing probe.
   \end{tabular}
 \end{table}
 
-The 128K bucket has a $0.99\times$ median paired ratio and averages about 88K
-actual tokens. Mean decode, dense / Bigger Bird, was 10.42 / 10.41,
-12.08 / 12.08, 14.06 / 14.08, 15.33 / 15.34, and 13.76 / 13.77~ms/token,
-respectively. Pooled accuracy was 35.3\% / 34.6\% (416/1178 vs.\ 407/1178);
-paired McNemar $p \geq 0.683$ does not establish equivalence. Code.Debug and
-LongBench~v2 prompts beyond 130K were middle-truncated (136/394 and 186/503).
-These scores do not measure patch success.
+The LongCodeQA 128k subset averaged approximately 88K tokens and achieved a median paired prefill ratio of $0.99\times$. Mean decode latency was nearly identical between dense attention and Bigger Bird, ranging from 10.42 to 15.33 ms/token from dense and 10.41 to 15.34 ms/token for Bigger Bird across the five benchmark subsets. Pooled accuracy was 35.3\% for dense attention (416/1178) and 34.6\% for Bigger Bird (407/1178). The paired McNemar test ($p \geq 0.683$) did not establish statistical equivalence. Prompts exceeding 130K were middle-truncated in Code.Debug (136/394) and LongBench~v2 (186/503). These accuracy measurements reflect first-token answer selection rather than successful code patching or repair. 
 
 \begin{table}[ht]
   \centering
@@ -614,17 +722,28 @@ These scores do not measure patch success.
   \end{tabular}
 \end{table}
 
-The LongCodeQA test is a no-KV-cache full-prompt forward (first-answer logits),
-not decoding or cache retention; 32 prompts remain unmeasured. Median paired
-prefill ratio on the measured LongCodeQA subset is $9.48\times$.
+% The LongCodeQA test measures first-answer logits from full-prompt forwards without KV cache, rather than decoding or cache retention. Out of 50 prompts, 18 have been evaluated, yielding a median paired prefill speedup of $9.48\times$; the remaining 32 have yet to be tested. 
+
+
+No KV caching is used in the LongCodeQA experiment. Hence, we only measure first answer logit values. We do not measure 32 prompts. The median ratio of pairs in measured prompts is $9.48\times$.
+
 
 \subsection{Earlier project screening experiments}
 
-Table~\ref{tab:screening} records an early prototype screen: byte budget
-65{,}536, 30 examples, depth 0.5, R1 on an H100 3g.40GB MIG, no KV cache.
-The scorer extracts the first number and checks its last digit. Bigger Bird
-v3 is \emph{not} in this batch; it was developed afterward under a separate
-Modal NIAH protocol (Tables~\ref{tab:v3-niah}--\ref{tab:v3-ablate}).
+% Table~\ref{tab:screening} records an early prototype screen: byte budget
+% 65{,}536, 30 examples, depth 0.5, R1 on an H100 3g.40GB MIG, no KV cache.
+% The scorer extracts the first number and checks its last digit. Bigger Bird
+% v3 is \emph{not} in this batch; it was developed afterward under a separate
+% Modal NIAH protocol (Tables~\ref{tab:v3-niah}--\ref{tab:v3-ablate}).
+
+
+
+Table~\ref{tab:screening} shows one of our early screens: byte budget
+65{,}536, 30 samples, depth 0.5, R1 on H100 3g.40GB MIG, no KV cache.
+The scorer takes the first number from the string and looks at the final digit. Bigger Bird v3 \emph{is not} included here since it was developed later under a different Modal NIAH process
+(Tables~\ref{tab:v3-niah}--\ref{tab:v3-ablate}).
+
+
 
 \begin{table}[ht]
   \centering
@@ -716,121 +835,123 @@ real-benchmark claim remains Section~\ref{sec:r1-benchmark}.
 \section{Developmental Encoder Experiments}
 \label{sec:developmental}
 
-This section keeps the encoder-scale architecture search (BART /
-BigBird-RoBERTa) that preceded the R1 line. These were smaller experiments
-than the H100 suite, but they are how the project reached Bigger Bird v3:
-they established the team's sparse-attention workflow, made early scaling
-trends in kernel time, latency, memory, and training cost visible, and
-supplied the rationale for favoring content-based routing over fixed or
-untrained selection alone. They support the path to Section~\ref{sec:results};
-they do not replace it.
+Before moving to decoder models, we explored sparse attention on
+encoder-scale models (BART and BigBird-RoBERTa) fine-tuned for IMDb
+sentiment classification. These experiments are smaller and less controlled
+than those in Section~\ref{sec:results}, but several design choices in Bigger
+Bird~v3 came directly from them, and we report them for that reason.
+
+Two limitations apply throughout this section. First, most IMDb reviews are a
+few hundred tokens long, so at 8K tokens and beyond the inputs consist largely
+of padding. These runs therefore measure cost and training stability at
+length, not the use of long-range evidence. Second, each configuration was
+run once, with training budgets that differed across runs, so F1 differences
+of a few points fall within the variation we observed between neighbouring
+lengths.
+
+Section~\ref{sec:dev-outcomes} summarizes each prototype and what it showed.
+The following subsections report kernel and task-level efficiency, and
+Section~\ref{sec:bigbird-family-results} compares selection rules within the
+BigBird family.
 
 \subsection{Per-architecture outcomes}
+\label{sec:dev-outcomes}
 
-The following summary records the strongest and weakest measured outcomes for
-each early architecture. Detailed efficiency tables follow in
-Section~\ref{sec:efficiency}; complete developmental tables are in the
-appendix.
+Table~\ref{tab:dev-summary} lists every encoder-scale prototype. Most of the
+results fall into four groups, and each group informed a different part of
+the decoder design.
 
-\textbf{Dense Baseline (Experiment 0).} The baseline reaches its best IMDb F1
-of 0.931 at 768 tokens and 0.917 at 16{,}384 tokens. Its isolated attention
-kernel requires 95.4~ms at 16{,}384 tokens and OOMs at 32{,}768; at task level
-it completes 32{,}768 tokens using 20.6~GB and 925~ms per sequence, but fails
-at 65{,}536 tokens.
+\paragraph{Learned routers were fast but unstable.}
+Several prototypes added a small learned component to decide where each query
+should look: a low-rank key scorer (Experiment~1), a gate for global tokens
+(Experiment~3), a block router (Experiment~4), and combinations of these
+(Experiments~6 and~10). Their kernels were the fastest we measured, about
+17$\times$ dense attention at 16K tokens, but training often collapsed to
+majority-class prediction. Experiment~1 fell to F1 0.519 at 2K tokens and to
+zero at 32K, and Experiment~6 collapsed at every length tested. The decoder
+screens in Section~\ref{sec:results} showed a similar pattern, with untrained
+selection components failing retrieval. For this reason, Bigger Bird~v3 does
+not add a learned router; it selects distant keys using the attention scores
+of the pretrained model itself.
 
-\textbf{DeepSeek Top-k Routing (Experiment 1).} The kernel is
-2.3--4.6$\times$ faster than dense attention from 1024 to 4096 tokens and
-17.4$\times$ faster at 16{,}384. Task quality is uneven: several runs reach
-F1 0.82--0.86, while the 2048-token run falls to 0.519 and the 32{,}768-token
-run collapses to F1 0.
+\paragraph{Kernel speedups did not carry over end to end.}
+Layer-Adaptive Sparsity (Experiment~7) was the most stable sparse method,
+within 0.003 F1 of dense attention at 1K tokens, and its kernel ran
+17.5$\times$ faster than dense at 16K. However, inference at that length was
+only about 1.5$\times$ faster (169~ms versus 254~ms per sequence), and at 4K
+tokens a 97.7\% reduction in query--key comparisons produced a 12\% latency
+gain. The rest of the network, together with the cost of gathering selected
+keys, absorbed most of the saving. As a result, all speed results for v3 are
+reported as full-prompt prefill times on the complete model rather than as
+isolated kernel times.
 
-\textbf{Lightning Hybrid (Experiment 2).} Its measured kernel remains slower
-than dense attention, including 34.4~ms versus 27.1~ms at 4096 tokens, and
-several task-level runs collapse to F1 0. It is therefore more useful as an
-implementation diagnostic than as a leading candidate.
+\paragraph{Shortening the sequence saved the most resources.}
+Token Dropping (Experiment~8) discards 30\% of tokens after three dense
+layers. At 32K tokens it ran 3.47$\times$ faster than dense attention with
+82.5\% less peak memory, at a cost of 0.048 F1, and it was the only method to
+complete a 65K-token run. Dynamic Context (Experiment~13) goes further and
+keeps a fixed budget of 4{,}096 tokens. It reached the highest IMDb score (F1
+0.942 at 1K) and retrieved every needle on RULER at 4K, but its F1 fell to
+0.03 or below once inputs exceeded that budget. This suggests that a fixed
+token budget is effective only while the relevant evidence remains within it,
+which is why Bigger Bird~v3 keeps every token in the KV cache and gives the
+final prompt queries exact attention.
 
-\textbf{Dynamic Global Tokens (Experiment 3).} Kernel time is below dense
-attention at 4096 tokens, but task quality is unstable: a strong 512-token run
-is followed by majority-class collapses at multiple longer lengths. The
-learned global gate is not yet reliable across configurations.
+\paragraph{The first Bigger Bird preserved quality but was costly.}
+Unified Bigger Bird (Experiment~5) combined MMR local selection, learned
+globals, and teleports on BART. It matched dense quality at 768 tokens (F1
+0.926 versus 0.931), but it trained 12.8$\times$ more slowly, ran slower than
+dense in the 1K--2K kernel benchmark, and ran out of memory at 4K. Although
+the selection ideas preserved quality, the implementation was too costly to
+scale. The later Triton prototypes (Experiment~19 and v3) moved selection
+into a fused kernel that does not build the full attention matrix.
 
-\textbf{PBS Attention (Experiment 4).} Block routing becomes faster than
-dense attention from 1024 tokens onward and approaches DeepSeek Top-k kernel
-time at 4096 tokens. However, several IMDb runs collapse to F1 0, so its
-kernel efficiency does not translate consistently to task quality.
-
-\textbf{Unified Bigger Bird (Experiment 5).} At 768 tokens it reaches F1
-0.926 versus 0.931 for dense attention, but requires 12.8$\times$ more
-training time. Several 1024--2048-token runs collapse and the recorded
-configuration OOMs at 4096 tokens. Section~\ref{sec:bigbird-family-results}
-compares related Bigger Bird variants.
-
-\textbf{DeepSeek + PBS Hybrid (Experiment 6).} Recorded IMDb runs from 512 to
-4096 tokens collapse to majority-class prediction despite favorable nominal
-comparison counts. The architecture is therefore classified as unsuccessful
-in its current implementation.
-
-\textbf{Layer-Adaptive Sparsity (Experiment 7).} This is the most consistent
-sparse method: F1 is 0.891 at 1024 tokens versus 0.894 for dense attention and
-0.864 at 4096 versus 0.909, while its kernel is 2.3--4.0$\times$ faster through
-4096 tokens and 17.5$\times$ faster at 16{,}384.
-
-\textbf{Token Dropping (Experiment 8).} This method has the strongest
-long-context resource profile. At 8192 tokens it is 3.28$\times$ faster in
-inference and uses 42.3\% less memory than dense attention; at 32{,}768 the
-advantages grow to 3.47$\times$ and 82.5\%. It is the only method with a
-completed 65{,}536-token IMDb run.
-
-\textbf{Attention Speculation (Experiment 9).} Available quality is
-reasonable at 1024--2048 tokens, but memory reaches 9.4~GB at 2048 and the
-method OOMs at 4096 tokens.
-
-\textbf{Grouped-Query Sparse Attention (Experiment 10).} The kernel scales
-well, reaching 2.2--3.9$\times$ speedups from 1024 to 4096 tokens and about
-17$\times$ at 16{,}384. Task-level runs remain unstable, with both useful and
-collapsed configurations.
-
-\textbf{Native Sparse Attention (Experiment 11).} One short-context run
-achieves strong IMDb quality, but its recorded training time is far above
-other methods and most latency and memory fields are missing. Because the
-implementation is marked unfinished, these values are preliminary.
-
-\textbf{S2-HHST (Experiment 12).} Available short-context runs reach moderate
-IMDb quality with training time somewhat above the dense baseline, but memory
-and latency are not recorded. Its unfinished status also limits conclusions.
-
-\textbf{Dynamic Context (Experiment 13).} This method produces the strongest
-IMDb quality result, F1 0.942 at 1024 tokens, together with 5.35~ms latency
-versus 13.18~ms for dense attention. The trade-off is nearly 10$\times$ longer
-training. On RULER it retrieves perfectly at 4096 tokens but degrades sharply
-at longer contexts.
-
-\textbf{Token Drop + DeepSeek Routing (Experiment 14).} The method retains
-competitive LRA Text F1 through 4096 tokens, but recorded memory is high and
-longer configurations OOM. Its evaluation settings also differ from the
-Bigger Bird runs, preventing direct chart comparison without re-evaluation.
-
-\textbf{Proper Bigger Bird (Experiment 15).} No standalone IMDb run is
-reported for the exact BigBird-RoBERTa configuration. The closest evidence is
-the BART-based BigBird-family ablation, which shares its MMR,
-facility-location, and teleport mechanisms but should not be treated as a
-direct measurement of Experiment~15.
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Encoder-scale prototypes on IMDb (single runs). Kernel speedups
+  are isolated attention time relative to dense. ``Collapse'' means
+  majority-class prediction (F1 = 0). Per-length results are in
+  Table~\ref{tab:app-imdb}.}
+  \label{tab:dev-summary}
+  \begin{tabularx}{\textwidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+    \toprule
+    Experiment & Outcome \\
+    \midrule
+    0 Dense & Best F1 0.931 (768 tokens); out of memory at 65K \\
+    \midrule
+    1 Low-rank top-$k$ & Kernel 17.4$\times$ at 16K; F1 0.519 at 2K, collapse at 32K \\
+    3 Dynamic globals & Strong at 512 tokens; collapses at several longer lengths \\
+    4 Block routing (PBS) & Kernel faster than dense from 1K; several collapses \\
+    6 Top-$k$ + block routing & Collapse at every length from 512 to 4K \\
+    10 GQA + top-$k$ & Kernel about 17$\times$ at 16K; mixed useful and collapsed runs \\
+    \midrule
+    7 Layer-adaptive & Within 0.003 F1 of dense at 1K; kernel 17.5$\times$ at 16K \\
+    8 Token dropping & 3.47$\times$ faster, 82.5\% less memory at 32K; only 65K run \\
+    13 Dynamic context & F1 0.942 at 1K; about 10$\times$ training time; fails retrieval past 4K \\
+    14 Token drop + top-$k$ & Competitive on LRA Text to 4K; out of memory beyond \\
+    \midrule
+    2 Lightning hybrid & Kernel slower than dense; several collapses \\
+    9 Attention speculation & Out of memory at 4K \\
+    11 NSA & One strong short run; implementation unfinished \\
+    12 S2-HHST & Moderate short-context F1; implementation unfinished \\
+    \midrule
+    5 Unified Bigger Bird & F1 0.926 versus 0.931 at 768; 12.8$\times$ training; out of memory at 4K \\
+    15 Proper Bigger Bird & No standalone run (see Section~\ref{sec:bigbird-family-results}) \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 \subsection{Highlighted models and early scaling plots}
 
-The developmental graphs focus on four representative models from the early
-search: the Dense Baseline as reference, Unified Bigger Bird as the then-target
-architecture, and two strong sparse alternatives by measured overall score
-(Dynamic Context and Token Dropping). For kernel-only plots, Layer-Adaptive
-Sparsity replaces Dynamic Context because Dynamic Context was not in the
-kernel benchmark.
 
-These plots are useful as early scaling evidence: Layer-Adaptive gave the
-most consistent IMDb quality--kernel-speed balance, Token Dropping scaled best
-to very long encoder contexts, and Dynamic Context produced the highest
-short-context IMDb F1. Several other methods had fast kernels but unstable
-task quality. Full per-experiment tables, including failed and incomplete
-runs, are in Tables~\ref{tab:app-kernel} and~\ref{tab:app-imdb}.
+The developmental experiments provide two complementary views of efficiency: isolated attention-kernel execution time and task-level performance. We highlight the Dense Baseline (Experiment 0), Unified Bigger Bird (Experiment 5), Dynamic Context (Experiment 13), and Token Dropping (Experiment 8) in the task-level comparisons. These represent the reference implementation, the initial Bigger Bird architecture, and two alternative approaches to reducing attention cost.
+
+For kernel-level comparisons, Layer-Adaptive Sparsity (Experiment 7) replaces Dynamic Context, for which no isolated kernel measurements were recorded. Additional sparse attention methods are included in the numerical tables to provide a broader comparison of scaling behaviour.
+
+These experiments reveal several trade-offs. Layer-Adaptive Sparsity achieves substantial kernel-level acceleration, while Token Dropping provides stronger end-to-end memory and latency reductions at longer sequence lengths. Dynamic Context achieves high short-context classification accuracy but introduces a fixed token budget. In contrast, Unified Bigger Bird preserves classification quality while incurring substantial computational overhead.
+
+Because the experiments use single runs with differing training budgets, and longer IMDb inputs contain substantial padding, the results should be interpreted as exploratory evidence of computational behaviour rather than definitive comparisons of model quality.
 
 \subsection{Log-Log Attention Forward Time}
 \label{sec:loglog}
@@ -848,20 +969,17 @@ runs, are in Tables~\ref{tab:app-kernel} and~\ref{tab:app-imdb}.
   \label{fig:loglog}
 \end{figure}
 
-Table~\ref{tab:loglog} reports isolated attention-kernel time over nearly nine
-sequence-length doublings. Dense attention grows from 0.386~ms at 128 tokens
-to 95.4~ms at 16{,}384 and then OOMs at 32{,}768. DeepSeek Top-k,
-Layer-Adaptive, and GQA Sparse separate sharply from dense attention after 512
-tokens: by 4096 they are 3.9--4.6$\times$ faster, and by 16{,}384 they are
-roughly 17.1--17.5$\times$ faster. All three complete a 32{,}768-token pass in
-approximately 10.5--10.7~ms, where dense attention no longer runs.
 
-The dense baseline's 8192-token time, 26.263~ms, is marginally lower than its
-4096-token time of 27.092~ms. This inversion is inconsistent with monotonic
-quadratic growth and likely reflects a difference between the original and
-extended timing sweeps rather than a genuine speedup. The extended points
-should therefore be interpreted as evidence of relative ordering and
-qualitative scaling, not as support for a single fitted exponent.
+Figure~\ref{fig:loglog} illustrates attention-kernel execution time as a function of sequence length on logarithmic axes. Table~\ref{tab:loglog} provides additional measurements for the Dense Baseline, DeepSeek Top-k, Layer-Adaptive Sparsity, and GQA Sparse Attention. The figure and table include different subsets of the developmental architectures.
+
+At short sequence lengths, the overhead of sparse attention can outweigh the benefits of reducing query-key interactions. At 128 tokens, dense attention requires 0.386 ms, compared with 0.463--0.528 ms for the three sparse methods in Table~\ref{tab:loglog}. As sequence length increases, sparse attention becomes more advantageous. At 4096 tokens, the sparse methods achieve approximately 3.9--4.6 times lower kernel execution time than dense attention.
+
+At 16,384 tokens, dense attention requires 95.415 ms, while the three sparse methods complete in approximately 5.5 ms, corresponding to speedups of 17.1--17.5 times. All three sparse methods also complete the 32,768-token kernel benchmark in approximately 10.5--10.7 ms, whereas the dense implementation encounters an out-of-memory failure.
+
+% numbers look a bit strange for figure 1/tabel 12, time decreases between 4k and 8k tokens; needs to be re-tested. Should be whatever for the manuscript. There is a note about this discontinuity but it more-so just states the way it was measured was inconsistent: "This inversion is inconsistent with monotonic quadratic growth and likely reflects a difference between the original and extended timing sweeps rather than a genuine speedup". I removed that part and the dagger in the table below as it does not provide anything. 
+
+% TLDR: Basically we have no good explanation for this and should be re-tested. 
+
 
 \begin{table}[ht]
   \centering
@@ -879,18 +997,20 @@ qualitative scaling, not as support for a single fitted exponent.
     1024   & 3.537 & 1.567 & 1.567 & 1.595 \\
     2048   & 9.007 & 2.889 & 2.897 & 2.961 \\
     4096   & 27.092 & 5.834 & 6.707 & 6.925 \\
-    8192   & 26.263$^\dagger$ & 2.935 & 2.953 & 3.007 \\
+    %8192   & 26.263$^\dagger$ & 2.935 & 2.953 & 3.007 \\
+    8192   & 26.263 & 2.935 & 2.953 & 3.007 \\
     16384  & 95.415 & 5.485 & 5.464 & 5.589 \\
     32768  & OOM & 10.522 & 10.504 & 10.739 \\
     \bottomrule
   \end{tabular}
 
-  \vspace{4pt}
-  \raggedright\footnotesize $^\dagger$Lower than the 4096-token value for the
-  same method; see discussion of the extended-sweep discontinuity above.
+  %\vspace{4pt}
+  %\raggedright\footnotesize $^\dagger$Lower than the 4096-token value for the
+  %same method; see discussion of the extended-sweep discontinuity above.
+  % ^ ? 
 \end{table}
 
-\subsection{Linear Scale on Short and Long Sequences}
+\subsection{Linear Scale on Short and Long Sequences} 
 
 \begin{figure}[ht]
   \centering
@@ -913,12 +1033,7 @@ qualitative scaling, not as support for a single fitted exponent.
   \label{fig:linear}
 \end{figure}
 
-Tables~\ref{tab:short} and~\ref{tab:long} present the same measurements on a
-linear time axis. At 128 tokens, fixed routing and gather overhead can make
-sparse methods slower than dense attention; most methods cross over between
-256 and 512 tokens. At longer lengths the gap widens rapidly: from 1024 to
-4096 tokens, dense attention grows by 7.7$\times$ while DeepSeek Top-k grows
-by 3.7$\times$.
+Figures~\ref{fig:linshort} and~\ref{fig:linlong} present kernel execution times on linear axes, separately highlighting short and long sequence lengths. Tables~\ref{tab:short} and~\ref{tab:long} provide the corresponding measurements for the broader set of developmental architectures.
 
 \begin{table}[ht]
   \centering
@@ -970,15 +1085,19 @@ by 3.7$\times$.
   \end{tabular}
 \end{table}
 
-Lightning Hybrid and Bigger Bird Unified remain slower than dense attention
-at every tested length in the long-sequence table. Token Dropping is fast at
-1024--2048 tokens but rejoins the dense kernel near 4096 tokens because its
-first three layers remain dense. This kernel-only behavior does not represent
-its complete end-to-end advantage, which appears once later-layer sequence
-reduction affects training, latency, and memory
-(Section~\ref{sec:efficiency}).
 
-\subsection{Efficiency Metrics: F1, Latency, Memory, and Training Time}
+At short sequence lengths, sparse attention does not provide a universal performance advantage. At 128 tokens, DeepSeek Top-k and Layer-Adaptive Sparsity are slower than dense attention, whereas PBS Attention and Token Dropping are slightly faster. By 256 tokens, DeepSeek Top-k, Layer-Adaptive Sparsity, and GQA Sparse Attention outperform the dense baseline. Other architectures, including Lightning Hybrid and Unified Bigger Bird, retain substantial overhead.
+
+The advantage of efficient sparse kernels becomes more pronounced at longer sequence lengths. Between 1024 and 4096 tokens, dense attention execution time increases from 3.537 ms to 27.092 ms, a factor of approximately 7.7. Over the same range, DeepSeek Top-k increases from 1.567 ms to 5.834 ms, a factor of approximately 3.7. This difference results in a growing relative advantage for the sparse implementation.
+
+Nevertheless, not all sparse architectures achieve improved kernel performance. Lightning Hybrid remains slower than dense attention throughout the 1024--4096-token range. Unified Bigger Bird is also slower at 1024 and 2048 tokens, reaching only a marginal advantage at 4096 tokens (26.502 ms versus 27.092 ms).
+
+Token Dropping similarly approaches dense kernel execution time at 4096 tokens
+(27.085 ms versus 27.092 ms). Its isolated attention measurements therefore understate the benefits observed at the full-model level, where dropping tokens reduces subsequent-layer computation and memory requirements.
+
+Together, these results demonstrate that reducing attention operations does not automatically translate into proportional execution-time improvements. Routing overhead, memory access patterns, and the fraction of computation affected by sparsification all influence realized performance.
+
+\subsection{Efficiency Metrics: F1, Latency, Memory, and Training Time} % @thomas In general, the tables and graphs here are a bit strange because they include and exclude various experiments seemingly at random
 \label{sec:efficiency}
 
 \begin{figure}[ht]
@@ -1018,8 +1137,7 @@ reduction affects training, latency, and memory
   \label{fig:efficiency}
 \end{figure}
 
-The panels compare task-level F1, latency, memory, and training time. The
-detailed tables add DeepSeek Top-k because it has broad length coverage; all
+Figure~\ref{fig:efficiency} compares the IMDb task-level F1 scores, latency, memory, and training time for the dense baseline, Bigger Bird, and two of the best performing sparse attention models. Tables~\ref{tab:eff-baseline}--\ref{tab:eff-dynamiccontext} include the DeepSeek Top-k model because a broad range of tests were performed for it; all
 other results appear in Table~\ref{tab:app-imdb}. An em-dash denotes a missing
 metric, and OOM denotes an out-of-memory failure.
 
@@ -1132,30 +1250,18 @@ metric, and OOM denotes an out-of-memory failure.
 \end{table}
 
 Several patterns emerge across Tables~\ref{tab:eff-baseline}--\ref{tab:eff-dynamiccontext}.
-Inference latency separates the methods most clearly: Dynamic Context holds
-latency in the 5.2--9.9~ms range across every tested length, roughly
-2.5--26$\times$ lower than dense attention at the same length, because its
-fixed post-drop token budget bounds the amount of computation regardless of
-input length. Token Dropping shows the same qualitative pattern at longer
-lengths, overtaking dense attention's memory profile once the sequence is long
-enough that the post-drop token count is meaningfully smaller than the full
-sequence (from roughly 2048 tokens onward). DeepSeek Top-k and Layer-Adaptive
-Sparsity track dense attention's memory footprint closely at short-to-medium
-lengths (within a few percent at 512--2048 tokens) because their savings are
-concentrated in comparison count rather than in the number of activations
+Inference latency separates the methods most clearly: Dynamic Context holds latency in the 5.2--9.9~ms range up to a context length of up to 4096, roughly 2.5--2.6$\times$ lower than dense attention at the same length, because its fixed post-drop token budget bounds the amount of computation regardless of input length. Token Dropping shows the same qualitative pattern for inference latency at longer
+lengths. In addition, starting at around 8192 tokens, the peak memory usage for Token Dropping grows substantially more slowly than that of dense attention (Fig.~\ref{fig:efficiency}). 
+
+DeepSeek Top-k and Layer-Adaptive Sparsity track dense attention's memory footprint closely at short-to-medium lengths (within a few percent at 512--2048 tokens) because their savings are concentrated in query-key comparison count rather than in the number of activations % TODO@thomas activation functions?
 stored, and their latency advantage over dense attention only becomes large
 at 8192 tokens and beyond (53.9--54.6~ms versus 75.7~ms).
+% @thomas Better to make a graph for Tables 15-19
 
-Quality is comparatively more volatile than efficiency: three of the five
-methods (DeepSeek Top-k, Layer-Adaptive, and, to a lesser extent, Token
-Dropping) each have at least one sequence length where F1 drops sharply below
-neighboring lengths (DeepSeek Top-k: 0.519 at 2048 tokens versus 0.820 at 1024
-and 0.821 at 4096; Token Dropping: 0.286 at 1024 tokens versus 0.776 at 2048).
-These dips do not follow a consistent direction with sequence length and are
-most plausibly attributable to training-run variance (sample count, epoch
-count, and random seed all differ across individual runs) rather than to a
-property of the mechanism itself; they argue for the matched, multi-seed
-re-run recommended in Section~\ref{sec:limitations}.
+Quality (F1) is comparatively more volatile than efficiency: two of the five methods (DeepSeek Top-k and Token
+Dropping) each have at least one sequence length where F1 drops sharply below neighboring lengths (DeepSeek Top-k: 0.519 at 2048 tokens versus 0.820 at 1024 and 0.821 at 4096; Token Dropping: 0.286 at 1024 tokens versus 0.776 at 2048).
+These dips do not follow a consistent trend with sequence length and are most plausibly attributed to training-run variance (sample count, epoch count, and random seed all differ across individual runs) rather than to a
+property of the mechanism itself; they argue for the matched, multi-seed re-run recommended in Section~\ref{sec:limitations}.
 
 Table~\ref{tab:quality-1024} isolates the 1024-token comparison directly, and
 Table~\ref{tab:tradeoffs} restates the same data as relative speedups and
@@ -1199,53 +1305,37 @@ memory reductions against the dense baseline at representative lengths.
     \bottomrule
   \end{tabular}
 \end{table}
-
-Comparison count alone is not an adequate efficiency proxy. Dynamic Context at
-1024 tokens reports about 1.85 billion softmax comparisons, versus 151 million
-for dense attention, despite its much lower measured inference latency;
-conversely, Layer-Adaptive at 4096 tokens reduces comparisons by 97.7\% but
-improves end-to-end latency by only 12\%. Kernel overhead, the point at which
-tokens are dropped, and the measurement boundary all need to be reported
-alongside the comparison count, not in place of it.
+% @thomas Would be nice if we had a table or graph for "comparisons"
+Reported query-key comparison counts do not solely predict measured latency. At 1,024 tokens, Dynamic Context reports about 1.85 billion comparisons, compared to 151 million for dense attention, yet its measured latency is lower. At 4,096 tokens, Layer-Adaptive Sparsity reports a reduction in query-key comparisons by 97.7\%, but improves end-to-end latency by only 12\%. This shows that runtime also depends on other factors such as kernel overhead, when tokens are dropped, and what the timing includes. The query-key comparison count metric should be defined alongside these results.
 
 \FloatBarrier
 \subsection{BigBird-family developmental comparison}
 \label{sec:bigbird-family-results}
 
-Figure~\ref{fig:bigbirdfamily} summarizes an early BigBird-family comparison
-at the two sequence lengths with matched family-level results. These runs
-helped the team compare selection variants (globals, MMR, teleports) on a
-shared encoder setup before moving to decoder long-context work. The
-768-token panel tests whether the variants preserve baseline quality; the
-8{,}000-token panel shows whether differences grow with context.
+The main bet behind Bigger Bird is that long-range links should be chosen
+from the content instead of being fixed in advance. This study was our first direct test
+of that bet. Starting from the original BigBird \citep{zaheer2020bigbird}, which
+mixes local, global, and random links, we built BART-based variants that added
+MMR local selection and facility-location globals, then compared random
+links against targeted teleports (Section~\ref{exp:bigbird-family}).
+Figure~\ref{fig:bigbirdfamily} shows the results at 768 and 8{,}000 tokens.
 
 \begin{figure}[ht]
   \centering
   \includegraphics[width=\linewidth]{fig_bigbird_family}
   \caption{BigBird-family IMDb F1 at 768 tokens (left) and 8{,}000 tokens
-  (right). All BigBird variants stay within 0.005 F1 of dense attention at
-  768 tokens while training 12--14.7$\times$ slower; at 8{,}000 tokens
-  the teleport-augmented variant reaches the family's best F1 (0.940) in
-  4.9$\times$ less time than plain BigBird.}
+  (right).}
   \label{fig:bigbirdfamily}
 \end{figure}
 
-At 768 tokens, all variants cluster within 0.005 F1 of the dense baseline, so
-the figure shows little evidence of a meaningful quality separation at short
-context. At 8{,}000 tokens, the teleport-augmented variant separates from
-plain BigBird and the random-link variant, suggesting that targeted teleports
-are more useful than additional random connections in this configuration.
-
-Table~\ref{tab:bigbird-family} compares standard BigBird and four Bigger Bird
-variants (Section~\ref{exp:bigbird-family}) against dense attention and the
-unified design (Experiment~5) at 768 tokens. All BigBird-family variants land
-within 0.005 F1 of dense attention, but every one of them trains
-12--14.7$\times$ slower.
+At 768 tokens the variants were indistinguishable. Every one stayed within
+0.005 F1 of dense attention (Table~\ref{tab:bigbird-family}), so adding
+global selection or MMR neither helped nor hurt at this length.
 
 \begin{table}[ht]
   \centering
   \small
-  \caption{BigBird-family IMDb results at sequence length 768.}
+  \caption{BigBird-family IMDb results at 768 tokens (single runs).}
   \label{tab:bigbird-family}
   \begin{tabular}{@{}lrrr@{}}
     \toprule
@@ -1254,95 +1344,134 @@ within 0.005 F1 of dense attention, but every one of them trains
     Dense baseline & 0.931 & 0.931 & 216.7 \\
     BigBird & 0.928 & 0.931 & 2766.6 \\
     Bigger Bird: globals & 0.926 & 0.929 & 3055.8 \\
-    Bigger Bird: top-k MMR & 0.927 & 0.930 & 2902.7 \\
-    Bigger Bird: top-k MMR v2 & 0.929 & 0.932 & 2929.3 \\
-    Bigger Bird: top-k MMR + globals & 0.929 & 0.932 & 3184.5 \\
+    Bigger Bird: top-$k$ MMR & 0.927 & 0.930 & 2902.7 \\
+    Bigger Bird: top-$k$ MMR v2 & 0.929 & 0.932 & 2929.3 \\
+    Bigger Bird: top-$k$ MMR + globals & 0.929 & 0.932 & 3184.5 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:bigbird-family} also exposes the main short-context trade-off:
-the methods retain nearly identical F1 and accuracy, but require
-12--14.7$\times$ the dense baseline's training time. Thus, the 768-token
-results support quality preservation, not a training-efficiency advantage.
-
-At the longer 8{,}000-token IMDb configuration, the family separates further:
-BigBird reaches F1~0.925 in 21{,}504~s of training, while Bigger Bird with
-top-k~MMR + globals + teleports reaches the family's best F1 (0.940) in only
-4348.7~s -- a 4.9$\times$ training-time reduction over plain BigBird at
-comparable or better quality (Table~\ref{tab:bigbird-8000}).
+At 8{,}000 tokens the variants separated (Table~\ref{tab:bigbird-8000}).
+Adding teleports to MMR and globals raised F1 to 0.940, the best in the
+family, against 0.925 for the unmodified BigBird. Adding random links instead gave
+0.928, slightly below the same configuration without them (0.938). These results are
+from single runs, so the gaps are suggestive rather than established, but their
+direction matters for this paper as they suggest that links chosen by content
+help, and links chosen at random do not.
 
 \begin{table}[ht]
   \centering
   \small
-  \caption{BigBird-family IMDb results at sequence length 8000.}
+  \caption{BigBird-family IMDb results at 8{,}000 tokens (single runs). No
+  dense run was recorded at exactly this length.}
   \label{tab:bigbird-8000}
   \begin{tabular}{@{}lrrr@{}}
     \toprule
     Method & F1 & Accuracy & Training time (s) \\
     \midrule
     BigBird & 0.925 & 0.928 & 21{,}504.5 \\
-    Bigger Bird: top-k MMR + globals & 0.938 & 0.940 & 7484.3 \\
-    Bigger Bird: top-k MMR + globals + random & 0.928 & 0.930 & 5832.9 \\
-    Bigger Bird: top-k MMR + globals + teleports & \textbf{0.940} & \textbf{0.941} & \textbf{4348.7} \\
+    Bigger Bird: top-$k$ MMR + globals & 0.938 & 0.940 & 7484.3 \\
+    Bigger Bird: top-$k$ MMR + globals + random & 0.928 & 0.930 & 5832.9 \\
+    Bigger Bird: top-$k$ MMR + globals + teleports & \textbf{0.940} & \textbf{0.941} & \textbf{4348.7} \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:bigbird-8000} shows that teleports provide the strongest
-combined result: F1 improves from 0.925 to 0.940 while training time falls by
-about 80\% relative to plain BigBird. The comparison remains preliminary,
-however, because these runs should be repeated under the matched protocol
-described in Section~\ref{sec:limitations}.
+However, these quality gains came at a substantial training cost. Every
+variant trained far more slowly than dense attention: 12--14.7$\times$ at 768
+tokens, and at 8{,}000 tokens the teleport variant took 4{,}349~s against
+441~s for the closest dense run (8{,}192 tokens,
+Table~\ref{tab:eff-baseline}). Teleports did cut training time by 4.9$\times$ relative to stock BigBird,
+but not enough to close that gap. These results motivated the design of
+Bigger Bird~v3, which keeps content-based selection of distant positions but
+removes the training cost by applying it at inference time, through a Triton
+kernel, to a pretrained decoder.
 
 \FloatBarrier
 \section{Discussion}
 
-The primary claim rests on the matched R1 evaluation: Bigger Bird v3 preserves
-dense multiple-choice quality closely on long-context prompts while improving
-mean prefill on the longer suites, with the speed crossover appearing beyond
-the local-window regime. Decode speed is essentially unchanged without
-eviction; the eviction arm matches first-token answers by construction and
-should not be read as a long-generation quality result.
+\subsection{Empirical Synthesis and Design Trajectory}
 
-The developmental IMDb / kernel experiments explain how the project arrived
-here. They were small-scale relative to Exp~20, but they made the scaling
-behavior of routing, token dropping, and hybrid patterns visible early, and
-they justified investing in content-based selection rather than fixed sparse
-graphs alone. DeepSeek Top-k, Layer-Adaptive, and GQA Sparse showed strong
-isolated kernel scaling; Token Dropping and Dynamic Context offered distinct
-quality--efficiency profiles. Later R1 screens then showed that untrained
-learned routers and undersized budgets fail synthetic retrieval, which is why
-Bigger Bird v3 keeps sinks, a large window, routed distant keys, and an exact
-tail. In short, the encoder work is the rationale and scaling scaffold; the
-R1 suite is the current evidence.
+Our results suggest that Bigger Bird v3 offers a promising trade-off between long-context inference and answer quality. The matched R1 evaluation showed that sparse prefill maintained accuracy close to dense attention while achieving mean speedups of 1.09-1.27x on longer benchmarks. However, sparse attention was slower at shorter context lengths, indicating that routing overhead can outweigh computational savings until sequences become sufficiently long. The significantly larger speedup of 10.23x observed in the near 1M token pilot further suggests that the approach may become more advantageous at extreme context lengths, although this result remain preliminary. 
+
+The developmental IMDb / kernel experiments highlight a common distinction between theoretical sparsity, kernel efficiency, and end-to-end performance. Several early architectures achieved substantial kernel speedups but suffered from unstable task quality or limited overall latency improvements. 
+
+DeepSeek Top-k, Layer-Adaptive, and GQA Sparse showed strong
+isolated kernel scaling; Token Dropping and Dynamic Context offered distinct quality--efficiency profiles. Subsequent R1 experiments showed that untrained routing mechanisms and insufficient attention budgets can compromise long-range information retrieval. Hence, these findings motivated Bigger Bird v3's combination of attention sinks, local windows, content-based routing, and an exact attention tail. Overall, the results suggest that effective sparse attention requires balancing computational savings against the preservation of task-relevant information, rather than maximizing sparsity alone. 
+
+\subsection{Complexity and Break-Even Analysis}
+
+For a prompt of length $n$, standard causal self-attention evaluates $\frac{n(n+1)}{2} = \mathcal{O}(n^2)$ query--key inner products per head in each layer~\cite{vaswani2017attention}. Bigger Bird~v3 parameterizes the sparse prefill mask with five fixed constants: $S = 64$ attention sinks, a local causal window of width $W = 16{,}384$, up to $R = 512$ content-routed distant positions per head, a late-prompt routing query set of size $Q_r = 64$, and an exact dense tail of length $T = 256$.
+
+Whenever $n > S + W + T$, the total number of per-head query--key inner
+products in a single prefill layer is bounded by four terms:
+\begin{align}
+C_{\mathrm{BBv3}}(n) &\le
+  \underbrace{\frac{(S+W)(S+W+1)}{2}}_{\text{prefix dense corner}}
+  + \underbrace{(n - T - S - W)(S + W + R)}_{\text{sparse prefill body}} \nonumber \\
+  &\quad + \underbrace{Tn - \frac{T(T-1)}{2}}_{\text{exact tail}}
+  + \underbrace{Q_r n - \frac{Q_r(Q_r-1)}{2}}_{\text{routing pass}}.
+\label{eq:bb-comparisons}
+\end{align}
+The first term accounts for queries $i \le S + W$, whose sinks and sliding window already cover their full causal prefix. The second term bounds the sparse body ($S + W < i \le n - T$), where each query attends to at most $S + W + R = 16{,}960$ keys. The third term reflects exact causal attention for the final $T = 256$ prompt queries, and the fourth bounds the cost of scoring all prefix keys against the final $Q_r = 64$ queries to select the routed indices (an overhead of less than $0.4\%$ of the sparse body). Asymptotically, the total comparison count scales linearly as $\mathcal{O}\bigl(n(S + W + R + T + Q_r)\bigr) = \mathcal{O}(n)$ per layer. Collapsing and combining terms, the exact cost bound for $n > 16{,}704$ is $$C_{\mathrm{BBv3}}(n) \le 17{,}280\,n - 1.481 \times 10^8.$$
+
+Comparing $\frac{n(n+1)}{2}$ against $C_{\mathrm{BBv3}}(n)$ yields a theoretical attention-comparison break-even point at $n \approx 18{,}850$ tokens. Because attention represents only a fraction of full-model prefill time and dense SDPA benefits from highly optimized FlashAttention Tensor Core scheduling on GPUs \cite{dao2022flashattention}, the empirical crossover shown in Tables~\ref{tab:r1-benchmark} and \ref{tab:1m-evals} comes much later at around $\sim100{,}000$ context size, where the theoretical attention comparison ratio is $\sim3\times$. This is when the reduction in FLOP count overcomes the kernel overhead and non-attention fixed costs, resulting in the $1.09\times$--$1.27\times$ end-to-end prefill speedups. At longer and longer context, quadratic dense attention dominates prefill compute and the theoretical comparison ratio continues to upper-bound the empirical prefill speedup.
+
+\subsection{Approximation Error and Expressivity Bounds}
+
+Because Bigger Bird~v3 is applied training-free to pretrained dense checkpoints, its primary theoretical objective is approximating dense causal attention rather than learning new multi-hop routing weights from scratch. For any query $i$ in a given layer and head, let $A_i = (A_{i,1}, \dots, A_{i,i})$ denote the exact dense causal softmax weights, $S_i \subseteq \{1, \dots, i\}$ the retained key set, and $\epsilon_i = \sum_{j \notin S_i} A_{i,j} \in [0, 1)$ the omitted attention probability mass. Renormalizing softmax over $S_i$ gives sparse weights $\tilde{A}_{i,j} = A_{i,j} / (1 - \epsilon_i)$ for $j \in S_i$ and $0$ otherwise, whose $\ell_1$ deviation from dense attention is exact: 
+
+\begin{equation}
+\lVert A_i - \tilde{A}_i \rVert_1
+  = \sum_{j \in S_i} \left(\frac{A_{i,j}}{1 - \epsilon_i} - A_{i,j}\right)
+  + \sum_{j \notin S_i} A_{i,j}
+  = \frac{\epsilon_i}{1 - \epsilon_i}(1 - \epsilon_i) + \epsilon_i
+  = 2\epsilon_i.
+\label{eq:l1-mass-error}
+\end{equation}
+
+Consequently, the Euclidean error between the dense output $o_i = \sum_{j=1}^i A_{i,j} v_j$ and the sparse output $\tilde{o}_i = \sum_{j \in S_i} \tilde{A}_{i,j} v_j$ satisfies
+
+\begin{equation}
+\lVert o_i - \tilde{o}_i \rVert_2
+  = \left\lVert \sum_{j=1}^i (A_{i,j} - \tilde{A}_{i,j}) v_j \right\rVert_2
+  \le 2\epsilon_i \max_{1 \le j \le i} \lVert v_j \rVert_2.
+\label{eq:l2-output-error}
+\end{equation}
+
+This bound motivates each architectural component of Bigger Bird~v3 directly: the $64$ attention sinks and $16{,}384$-token local window capture the structurally persistent attention mass associated with initial sink tokens~\cite{xiao2024streamingllm} and local recency; the per-head content router targets up to $512$ high-mass distant columns to suppress the remaining tail mass $\epsilon_i$; and the exact $256$-token tail enforces $\epsilon_i = 0$ identically at the end of the prompt, eliminating single-layer attention truncation error where answer aggregation occurs.
+
+Original BigBird~\cite{zaheer2020bigbird} established three foundational theoretical results for sparse Transformers: universal approximation of continuous sequence-to-sequence functions via a bidirectional star graph, Turing completeness under arbitrary precision, and a depth lower bound under the Orthogonal Vectors Conjecture (OVC). We apply and discuss these frameworks in relation to BiggerBird~v3 below:
+
+\textbf{Universal approximation and causal reachability:}
+The Universal Approximation Theorem established in the original BigBird~\cite{zaheer2020bigbird} applies to bidirectional encoders, while Bigger Bird~v3 operates under a causal decoder mask where early sink tokens cannot attend to future positions. Restricting the target function class to continuous \emph{causal} sequence-to-sequence mappings, v3's $16{,}384$-token sliding window still guarantees full causal reachability between any $j \le i$ in at most $\lceil (i - j) / W \rceil$ hops, satisfying the graph-connectivity requirement for idealized causal universality under unbounded depth, trainable weights, and arbitrary precision \cite{yun2020connections}. In practice, however, universal approximation proofs are existential and rely on specialized multi-hop relay weights. Because v3 runs training-free on frozen, fixed-depth weights optimized for single-hop dense attention, multi-hop propagation through the window alone is unreliable, a theoretical gap confirmed empirically by Table~\ref{tab:v3-ablate} where removing the exact tail (\texttt{exact\_tail = 0}) drops $\sim 127\text{K}$ needle retrieval from $6/6$ to $2/6$, while restoring \texttt{exact\_tail = 256} recovers $6/6$.
+
+\textbf{Depth lower bound (OVC):}
+Outside the final $256$ tokens, Bigger Bird~v3 computes $\mathcal{O}(n)$ inner products per layer. The original BigBird's lower bound~\cite{zaheer2020bigbird} therefore continues to hold for the prefill body: under the Orthogonal Vectors Conjecture, solving simultaneous all-pairs global comparison tasks (such as finding the furthest vector for every token in parallel) requires $\widetilde{\Omega}(n^{1-o(1)})$ layers. For inference queries positioned at the end of the prompt or during generation, however, v3's exact $256$-token tail and exact decode over the retained KV cache bypass this all-pairs bottleneck in $\mathcal{O}(1)$ layers.
+
+\textbf{Turing completeness, precision, and KV eviction:}
+Unlike BigBird's sparse-decoder Turing completeness construction, which required an explicit causal sparse graph and $\mathcal{O}(\sqrt{i})$ intermediate scratchpad steps per tape lookup~\cite{zaheer2020bigbird}, Bigger Bird~v3 retains exact dense attention during autoregressive decode. Under the standard idealized assumptions of unbounded memory and arbitrary numerical precision, exact decode over the full KV cache trivially preserves Turing completeness \cite{perez2019turing}. In deployment, however, two practical constraints strictly reduce the system to a bounded finite-state automaton: BF16 precision bounds addressable state, and enabling optional KV eviction (\texttt{bb\_evict64k} in Table~\ref{tab:r1-evict} or fixed $16\text{K}$--$128\text{K}$ budgets in Experiment~21, Table~\ref{tab:1m-exp21}) discards prefix entries and removes access to an unbounded tape history.
+
 
 \section{Limitations}
 \label{sec:limitations}
 
-R1 timings used short warmups, and the resolved upstream R1 weight revision
-was not recorded in Modal metadata. Code.Debug and LongBench~v2 prompts beyond
-130K were middle-truncated. The LongCodeQA 1M pilot covers 18/50 prompts under a
-no-KV-cache protocol and must not be merged with the R1 128K-class table or
-with Nemotron synthetic 1M runs. First-token A--D scores are not patch repair,
-CoT generation quality, or long-decode quality after eviction. Published
-methods such as DSA, LSA, and ZHA were not run under our matched protocol.
+The primary evaluation is limited to R1-Distill-Llama-8B on a single H100 GPU, with quality measured through first-token multiple-choice accuracy rather than full autoregressive generation or downstream task completion. Moreover, dense accuracy on Code.Debug and LongBench v2 was close to chance, limiting conclusions on reasoning-quality preservation. Furthermore, nonsignificant accuracy differences do not establish equivalence, and prompts exceeding 130k tokens were middle-truncated, potentially removing task-relevant information. 
 
-The developmental IMDb / kernel experiments use unequal training budgets,
-incomplete metric fields, and single-run estimates, so they support design
-rationale and qualitative scaling more than definitive encoder rankings.
-``Bigger Bird'' historically referred to Experiment~5 (BART), Experiment~15
-(BigBird-RoBERTa), Experiment~19 (Flash prototype), and the current v3 method;
-readers should rely on the explicit version and experiment number.
+The R1 timing protocol used short warmups and a single timed forward per example, limiting the reliability of latency estimates. The exact upstream R1 weight revision was also not recorded in Modal metadata, reducing reproducibility. The near 1M token LongCodeQA pilot covers only 18 of 50 prompts under a separate no-KV-cache protocol, preventing conclusions on end-to-end generation performance at this scale. Similarly, the KV-eviction experiments do not establish long-generation quality, as eviction occurs after first-token logits are computed, nor do they demonstrate peak-memory savings under the evaluated protocol. 
+
+Selecting the $512$ distant routed positions from the mean causal attention probabilities of the final $64$ prompt queries relies on a late-query proxy assumption: that the keys most salient to the end of the prompt cover the long-range context needed by earlier prefill tokens. This assumption aligns well with prompts whose question or instruction appears at the end (the same structural property assumed by our middle-truncation protocol), but can weaken on instruction-first prompts where the final $64$ tokens consist solely of document text. Moreover, because our primary R1 evaluation scores first-token multiple-choice logits without chain-of-thought generation, it does not measure routing drift during extended multi-step decoding, where newly generated reasoning steps may depend on distant facts whose prefix KV representations were constructed without attending to one another during prefill.
+
+Broadcasting routing indices chosen by the final $64$ prompt queries to earlier prefill tokens is causally valid during inference prefill, where the entire prompt is fixed prior to generation, but cannot be applied unmodified to parallel autoregressive training. Allowing an intermediate token at position $i < n - 64$ to select keys using attention scores from the final $64$ tokens would leak future information backward into next-token predictions at position $i$. Extending Bigger Bird to the sparse-attention training regime noted in Section~\ref{sec:conclusions} will therefore require strictly causal per-query or per-block routing mechanisms.
+
+Finally, the individual contributions of Bigger Bird v3's attention components have not been fully isolated through ablations. Published sparse-attention methods (DSA, LSA, and ZHA) have not been evaluated under the matched protocol, leaving comparative performance unresolved. The earlier IMDb and kernel experiments also use unequal training budgets, incomplete metrics, and single-run estimates, and should therefore be interpreted as developmental evidence rather than definitive architectural comparisons. 
 
 \section{Conclusions and Recommendations}
+\label{sec:conclusions}
+Bigger Bird v3 is a context-aware sparse-prefill method for long-context decoder inference. On the matched H100 R1 suite, it remains close to dense multiple-choice accuracy while improving prefill on longer prompts. Next steps are completing the remaining 1M LongCodeQA prompts, longer-generation and
+eviction quality tests, sparse-attention training, and matched comparisons against recent inference-time sparse methods.
 
-Bigger Bird v3 is a context-aware sparse-prefill method for long-context
-decoder inference. On the matched H100 R1 suite, it remains close to dense
-A--D accuracy while improving prefill on longer prompts. Next steps are
-completing the remaining 1M LongCodeQA prompts, longer-generation and
-eviction quality tests, sparse-attention training, and matched comparisons
-against recent inference-time sparse methods.
+Together, these results suggest that attention routing can substantially reduce long-context prefill cost while keeping pooled accuracy close to dense attention, though the accuracy gap and limited 1M-prompt pilot leave quality at larger contexts to be tested.
 
 
 \clearpage
